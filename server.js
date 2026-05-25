@@ -1,151 +1,96 @@
-const axios = require("axios");
+import fetch from 'node-fetch';
 
-const API_URL = "https://treo-lc79.onrender.com/";
-const ID = "S2king";
+// Hàm lấy toàn bộ dữ liệu lịch sử từ API
+async function fetchHistory() {
+  const response = await fetch('https://treo-lc79.onrender.com/');
+  const data = await response.json();
 
-// ─── Thuật toán dự đoán dựa trên toàn bộ lịch sử ───────────────────────────
-
-function buildChuoiCau(history) {
-  // history đã được sort tăng dần (cũ → mới)
-  return history
-    .map((h) => (h.result === "TAI" ? "T" : "X"))
-    .join("");
+  // API có thể trả về object chứa mảng, hoặc trực tiếp là mảng
+  let sessions = Array.isArray(data) ? data : (data.data || data.sessions || data.history || []);
+  
+  // Sắp xếp tăng dần theo số phiên
+  sessions.sort((a, b) => a.phien - b.phien);
+  return sessions;
 }
 
-function detectPattern(chuoi) {
-  const len = chuoi.length;
-  if (len < 4) return null;
+// Thuật toán dự đoán dựa trên toàn bộ chuỗi cầu
+function predictNext(history) {
+  if (history.length === 0) {
+    return { du_doan: 'tài', do_tin_cay: 50 };
+  }
 
-  // Kiểm tra nhiều độ dài pattern (2-6) để tìm pattern lặp lại nhiều nhất
-  let bestScore = 0;
-  let bestNext = null;
+  // Xây dựng chuỗi cầu T/X
+  const chuoi = history.map(item => item.ket_qua.toLowerCase() === 'tài' ? 'T' : 'X').join('');
 
-  for (let patLen = 2; patLen <= 6; patLen++) {
-    const pat = chuoi.slice(-patLen);
-    let count = 0;
-    let nextAfterPat = [];
-    for (let i = 0; i <= len - patLen - 1; i++) {
-      if (chuoi.slice(i, i + patLen) === pat) {
-        count++;
-        nextAfterPat.push(chuoi[i + patLen]);
+  // Tìm mẫu cuối cùng có độ dài từ 10 đến 1
+  for (let len = Math.min(10, chuoi.length - 1); len >= 1; len--) {
+    const pattern = chuoi.slice(-len);
+    const nextChars = [];
+
+    // Duyệt toàn bộ chuỗi tìm pattern (trừ lần xuất hiện cuối cùng)
+    let searchIndex = 0;
+    while (searchIndex < chuoi.length - len) {
+      const foundIndex = chuoi.indexOf(pattern, searchIndex);
+      if (foundIndex === -1 || foundIndex >= chuoi.length - len) break;
+
+      const nextIndex = foundIndex + len;
+      if (nextIndex < chuoi.length) {
+        nextChars.push(chuoi[nextIndex]);
+      }
+      searchIndex = foundIndex + 1;
+    }
+
+    // Nếu tìm thấy ít nhất một lần xuất hiện
+    if (nextChars.length > 0) {
+      const countT = nextChars.filter(c => c === 'T').length;
+      const countX = nextChars.filter(c => c === 'X').length;
+      const total = countT + countX;
+
+      if (countT > countX) {
+        return { du_doan: 'tài', do_tin_cay: Math.round((countT / total) * 100) };
+      } else if (countX > countT) {
+        return { du_doan: 'xỉu', do_tin_cay: Math.round((countX / total) * 100) };
+      } else {
+        // Bằng nhau thì chọn ngẫu nhiên 50%
+        return { du_doan: Math.random() < 0.5 ? 'tài' : 'xỉu', do_tin_cay: 50 };
       }
     }
-    if (count > 0) {
-      const tCount = nextAfterPat.filter((c) => c === "T").length;
-      const xCount = nextAfterPat.filter((c) => c === "X").length;
-      const dominantNext = tCount >= xCount ? "T" : "X";
-      const score = Math.max(tCount, xCount) * count;
-      if (score > bestScore) {
-        bestScore = score;
-        bestNext = dominantNext;
-      }
-    }
-  }
-  return bestNext;
-}
-
-function analyzeStreak(chuoi) {
-  // Phân tích chuỗi liên tiếp hiện tại
-  if (!chuoi.length) return null;
-  const last = chuoi[chuoi.length - 1];
-  let streak = 1;
-  for (let i = chuoi.length - 2; i >= 0; i--) {
-    if (chuoi[i] === last) streak++;
-    else break;
-  }
-  // Cầu dài (>= 4) thường gãy → đoán ngược
-  if (streak >= 4) return last === "T" ? "X" : "T";
-  // Cầu 1-2 → tiếp tục
-  if (streak <= 2) return last;
-  return null;
-}
-
-function countTaiXiu(history) {
-  const t = history.filter((h) => h.result === "TAI").length;
-  const x = history.filter((h) => h.result === "XIU").length;
-  return { t, x };
-}
-
-function predict(history) {
-  if (!history || history.length === 0) return { du_doan: "tài", do_tin_cay: 50 };
-
-  // Sort cũ → mới
-  const sorted = [...history].sort((a, b) => a.phien - b.phien);
-  const chuoi = buildChuoiCau(sorted);
-
-  // Phiếu bầu từ 3 thuật toán
-  const votes = { T: 0, X: 0 };
-  const reasons = [];
-
-  // 1. Pattern matching (trọng số 3)
-  const patternNext = detectPattern(chuoi);
-  if (patternNext) {
-    votes[patternNext] += 3;
-    reasons.push(`pattern→${patternNext}`);
   }
 
-  // 2. Streak analysis (trọng số 2)
-  const streakNext = analyzeStreak(chuoi);
-  if (streakNext) {
-    votes[streakNext] += 2;
-    reasons.push(`streak→${streakNext}`);
-  }
-
-  // 3. Tần suất toàn lịch sử (trọng số 1)
-  const { t, x } = countTaiXiu(sorted);
-  const freqNext = t < x ? "T" : "X"; // thiên về bên ít hơn để cân bằng
-  votes[freqNext] += 1;
-  reasons.push(`freq→${freqNext}`);
-
-  // Kết quả
-  const totalVotes = votes.T + votes.X;
-  const winVotes = Math.max(votes.T, votes.X);
-  const winner = votes.T >= votes.X ? "T" : "X";
-  const confidence = Math.round((winVotes / totalVotes) * 100);
-
-  return {
-    du_doan: winner === "T" ? "tài" : "xỉu",
-    do_tin_cay: Math.min(confidence, 95),
-  };
+  // Không tìm thấy mẫu nào -> dự đoán 50/50
+  return { du_doan: Math.random() < 0.5 ? 'tài' : 'xỉu', do_tin_cay: 50 };
 }
 
-// ─── Main loop ───────────────────────────────────────────────────────────────
-
-async function run() {
+// Hàm chính
+async function main() {
   try {
-    const res = await axios.get(API_URL);
-    const data = res.data;
+    const sessions = await fetchHistory();
 
-    const latest = data.latest;
-    const history = data.history; // mảng ~100 phiên gần nhất
+    // Phiên cuối cùng đã có kết quả
+    const lastSession = sessions[sessions.length - 1];
+    const currentPhien = lastSession.phien;
+    const currentKetQua = lastSession.ket_qua.toLowerCase();
+    const currentXucXac = lastSession.xuc_xac; // Giả sử API trả về dạng "5-5-5"
 
-    // Sort cũ → mới để lấy chuỗi cầu đúng chiều
-    const sorted = [...history].sort((a, b) => a.phien - b.phien);
-    const chuoiCau = buildChuoiCau(sorted);
+    // Dự đoán phiên tiếp theo
+    const prediction = predictNext(sessions);
+    const nextPhien = currentPhien + 1;
 
-    // Lấy thông tin phiên mới nhất
-    const phienHienTai = latest.phien;
-    const phienDaDoan = latest.phien;
-    const ketQua = latest.result === "TAI" ? "tài" : "xỉu";
-    const xucXac = latest.dices.join("-");
+    // Tạo chuỗi cầu đầy đủ
+    const chuoiCau = sessions.map(s => s.ket_qua.toLowerCase() === 'tài' ? 'T' : 'X').join('');
 
-    // Dự đoán cho phiên tiếp theo
-    const { du_doan, do_tin_cay } = predict(history);
-
-    // In kết quả theo mẫu
-    console.log(`Id: ${ID}`);
-    console.log(`Phien: ${phienDaDoan}`);
-    console.log(`Ket_qua: ${ketQua}`);
-    console.log(`Xuc_xac: ${xucXac}`);
-    console.log(`Phien_hien_tai: ${phienHienTai + 1}`);
-    console.log(`Du_doan: ${du_doan}`);
-    console.log(`Do_tin_cay: ${do_tin_cay}%`);
-    console.log(`Chuoi_cau: ${chuoiCau.slice(-20)}`); // 20 ký tự gần nhất
-  } catch (err) {
-    console.error("Lỗi:", err.message);
+    // In ra đúng mẫu yêu cầu
+    console.log(`Id: S2king`);
+    console.log(`Phien: ${currentPhien}`);
+    console.log(`Ket_qua: ${currentKetQua}`);
+    console.log(`Xuc_xac: ${currentXucXac}`);
+    console.log(`Phien_hien_tai: ${nextPhien}`);
+    console.log(`Du_doan: ${prediction.du_doan}`);
+    console.log(`Do_tin_cay: ${prediction.do_tin_cay}%`);
+    console.log(`Chuoi_cau: ${chuoiCau}`);
+  } catch (error) {
+    console.error('Lỗi:', error.message);
   }
 }
 
-// Chạy ngay lập tức, sau đó cứ 30 giây chạy lại
-run();
-setInterval(run, 30000);
+main();
