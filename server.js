@@ -1,231 +1,225 @@
-const express = require('express');
-const axios = require('axios');
+const express = require("express");
+const axios = require("axios");
 
 const app = express();
+
 const PORT = process.env.PORT || 3000;
+const API_URL = "https://treo-lc79.onrender.com/";
 
-const API_URL = 'https://treo-lc79.onrender.com/';
+let cache = {
+  text: "Đang tải dữ liệu..."
+};
 
-// Hàm chuyển kết quả (dựa trên chuỗi)
-function mapResult(value) {
-  if (!value) return '?';
-  const str = String(value).toLowerCase().trim();
-  if (str === 'tài' || str === 'tai') return 'T';
-  if (str === 'xỉu' || str === 'xiu') return 'X';
-  return '?';
+function normalizeResult(text) {
+  if (!text) return "xỉu";
+
+  const t = String(text).toLowerCase();
+
+  if (
+    t.includes("tai") ||
+    t.includes("tài") ||
+    t === "t"
+  ) {
+    return "tài";
+  }
+
+  return "xỉu";
 }
 
-// Tự động tìm mảng chứa dữ liệu phiên (đệ quy)
-function findArray(obj, depth = 0) {
-  if (depth > 10) return null;
-  if (Array.isArray(obj) && obj.length > 0) return obj;
-  if (obj && typeof obj === 'object') {
-    for (let key in obj) {
-      const found = findArray(obj[key], depth + 1);
-      if (found) return found;
+function getDice(item) {
+  if (Array.isArray(item?.dice)) {
+    return item.dice.join("-");
+  }
+
+  if (Array.isArray(item?.xuc_xac)) {
+    return item.xuc_xac.join("-");
+  }
+
+  if (item?.dice1 && item?.dice2 && item?.dice3) {
+    return `${item.dice1}-${item.dice2}-${item.dice3}`;
+  }
+
+  return "1-1-1";
+}
+
+function buildCau(history) {
+  return history
+    .map(i => {
+      const r = normalizeResult(
+        i.result ||
+        i.ket_qua ||
+        i.status
+      );
+
+      return r === "tài" ? "T" : "X";
+    })
+    .join("");
+}
+
+function predict(history) {
+  if (!history.length) {
+    return {
+      prediction: "tài",
+      confidence: 50,
+      cau: ""
+    };
+  }
+
+  const results = history.map(i =>
+    normalizeResult(
+      i.result ||
+      i.ket_qua ||
+      i.status
+    )
+  );
+
+  const cau = results
+    .map(r => (r === "tài" ? "T" : "X"))
+    .join("");
+
+  let taiScore = 0;
+  let xiuScore = 0;
+
+  // Phân tích toàn bộ lịch sử
+  for (let i = 1; i < results.length; i++) {
+    const current = results[i];
+    const prev = results[i - 1];
+
+    // Bệt
+    if (current === prev) {
+      if (current === "tài") taiScore += 2;
+      else xiuScore += 2;
+    }
+
+    // Xen kẽ
+    if (current !== prev) {
+      if (current === "tài") taiScore += 1;
+      else xiuScore += 1;
     }
   }
-  return null;
-}
 
-// Tự động map các trường từ một object phiên
-function mapSessionFields(session) {
-  if (!session || typeof session !== 'object') return null;
+  // 5 phiên gần nhất
+  const recent = results.slice(-5);
 
-  // Các tên trường có thể có
-  const possiblePhien = ['phien', 'phiên', 'session', 'session_id', 'id', 'stt', 'no'];
-  const possibleKetQua = ['ket_qua', 'ketqua', 'result', 'kq', 'tai_xiu', 'value'];
-  const possibleXucXac = ['xuc_xac', 'xucxac', 'dice', 'xí_ngầu', 'faces'];
+  const taiRecent = recent.filter(x => x === "tài").length;
+  const xiuRecent = recent.filter(x => x === "xỉu").length;
 
-  let phien = null, ketQua = null, xucXac = null;
+  taiScore += taiRecent * 2;
+  xiuScore += xiuRecent * 2;
 
-  // Tìm trường chứa số phiên
-  for (let p of possiblePhien) {
-    if (session[p] !== undefined) {
-      phien = session[p];
+  // Bẻ cầu khi bệt dài
+  const last = results[results.length - 1];
+
+  let streak = 1;
+
+  for (let i = results.length - 2; i >= 0; i--) {
+    if (results[i] === last) {
+      streak++;
+    } else {
       break;
     }
   }
-  // Nếu không tìm thấy, thử lấy key đầu tiên có giá trị là số
-  if (phien === null) {
-    for (let key in session) {
-      if (typeof session[key] === 'number' || !isNaN(Number(session[key]))) {
-        phien = session[key];
-        break;
-      }
+
+  if (streak >= 4) {
+    if (last === "tài") {
+      xiuScore += streak * 3;
+    } else {
+      taiScore += streak * 3;
     }
   }
 
-  // Tìm trường chứa kết quả
-  for (let k of possibleKetQua) {
-    if (session[k] !== undefined) {
-      ketQua = session[k];
-      break;
-    }
-  }
-  if (ketQua === null) {
-    for (let key in session) {
-      let val = session[key];
-      if (typeof val === 'string') {
-        let lower = val.toLowerCase();
-        if (lower.includes('tài') || lower.includes('tai') || lower.includes('xỉu') || lower.includes('xiu')) {
-          ketQua = val;
-          break;
-        }
-      }
-    }
-  }
+  // Pattern 2-2
+  const last4 = cau.slice(-4);
 
-  // Tìm trường chứa xúc xắc (có thể là chuỗi "5-5-5" hoặc mảng)
-  for (let x of possibleXucXac) {
-    if (session[x] !== undefined) {
-      xucXac = session[x];
-      break;
-    }
-  }
-  if (xucXac === null) {
-    for (let key in session) {
-      let val = session[key];
-      if (typeof val === 'string' && /^\d+[-]\d+[-]\d+$/.test(val)) {
-        xucXac = val;
-        break;
-      }
-      if (Array.isArray(val) && val.length === 3 && val.every(v => typeof v === 'number')) {
-        xucXac = val.join('-');
-        break;
-      }
-    }
-  }
+  if (last4 === "TTXX") taiScore += 4;
+  if (last4 === "XXTT") xiuScore += 4;
+  if (last4 === "TXT X".replace(/\s/g, "")) xiuScore += 3;
+  if (last4 === "XTXT") taiScore += 3;
 
-  if (phien === null || ketQua === null) return null;
-  return { phien: Number(phien), ketQua: String(ketQua), xucXac: xucXac ? String(xucXac) : '?' };
-}
+  let prediction = taiScore >= xiuScore ? "tài" : "xỉu";
 
-// Hàm dự đoán (giữ nguyên logic cũ)
-function predictNext(historyStr) {
-  if (!historyStr || historyStr.length === 0) return { prediction: 'T', confidence: 50 };
-  const len = historyStr.length;
-  const maxPatternLen = Math.min(10, len);
-  let bestPrediction = null;
-  let bestConfidence = 0;
-  let bestPatternLen = 0;
+  let total = taiScore + xiuScore;
 
-  for (let patternLen = maxPatternLen; patternLen >= 1; patternLen--) {
-    if (len < patternLen + 1) continue;
-    const currentPattern = historyStr.slice(-patternLen);
-    let countT = 0, countX = 0, totalMatches = 0;
+  let confidence = Math.floor(
+    (Math.max(taiScore, xiuScore) / (total || 1)) * 100
+  );
 
-    for (let i = 0; i <= len - patternLen - 1; i++) {
-      const sub = historyStr.slice(i, i + patternLen);
-      if (sub === currentPattern) {
-        const nextChar = historyStr[i + patternLen];
-        if (nextChar === 'T') countT++;
-        else if (nextChar === 'X') countX++;
-        totalMatches++;
-      }
-    }
-
-    if (totalMatches > 0) {
-      let prediction = countT > countX ? 'T' : (countX > countT ? 'X' : null);
-      let confidence = Math.max(countT, countX) / totalMatches * 100;
-      if (!prediction) {
-        const totalT = (historyStr.match(/T/g) || []).length;
-        const totalX = (historyStr.match(/X/g) || []).length;
-        prediction = totalT >= totalX ? 'T' : 'X';
-        confidence = 50;
-      }
-      if (patternLen > bestPatternLen || (patternLen === bestPatternLen && confidence > bestConfidence)) {
-        bestPrediction = prediction;
-        bestConfidence = confidence;
-        bestPatternLen = patternLen;
-      }
-    }
-  }
-
-  if (!bestPrediction) {
-    const totalT = (historyStr.match(/T/g) || []).length;
-    const totalX = (historyStr.match(/X/g) || []).length;
-    bestPrediction = totalT >= totalX ? 'T' : 'X';
-    bestConfidence = (Math.max(totalT, totalX) / (totalT + totalX)) * 100;
-  }
+  if (confidence < 55) confidence = 55;
+  if (confidence > 95) confidence = 95;
 
   return {
-    prediction: bestPrediction === 'T' ? 'tài' : 'xỉu',
-    confidence: Math.round(bestConfidence)
+    prediction,
+    confidence,
+    cau
   };
 }
 
-app.get('/', async (req, res) => {
+async function updateData() {
   try {
-    const response = await axios.get(API_URL, { timeout: 15000 });
-    const rawData = response.data;
+    const response = await axios.get(API_URL, {
+      timeout: 10000
+    });
 
-    // Ghi log cấu trúc một phần để debug (chỉ in lên console Render)
-    console.log('===== DỮ LIỆU NHẬN ĐƯỢC =====');
-    console.log(JSON.stringify(rawData).slice(0, 1000));
-    console.log('==============================');
+    let data = response.data;
 
-    // Bước 1: Tìm mảng trong dữ liệu
-    let rawArray = findArray(rawData);
-    if (!rawArray) {
-      throw new Error('Không tìm thấy mảng dữ liệu nào trong API');
-    }
-    console.log(`Tìm thấy mảng với ${rawArray.length} phần tử. Mẫu phần tử đầu:`, rawArray[0]);
-
-    // Bước 2: Chuyển đổi từng phần tử thành phiên chuẩn
-    const sessions = [];
-    for (let item of rawArray) {
-      const mapped = mapSessionFields(item);
-      if (mapped) {
-        sessions.push(mapped);
+    if (!Array.isArray(data)) {
+      if (Array.isArray(data.history)) {
+        data = data.history;
+      } else if (Array.isArray(data.data)) {
+        data = data.data;
       } else {
-        console.log('Bỏ qua phần tử không map được:', item);
+        data = [];
       }
     }
 
-    if (sessions.length === 0) {
-      throw new Error('Không có phiên nào được map thành công từ dữ liệu');
-    }
+    if (!data.length) return;
 
-    // Sắp xếp theo số phiên
-    sessions.sort((a, b) => a.phien - b.phien);
+    const history = data.reverse();
 
-    let historyStr = '';
-    let lastSession = sessions[sessions.length - 1];
-    let lastResult = lastSession.ketQua;
-    let lastXucXac = lastSession.xucXac;
+    const latest = history[history.length - 1];
 
-    for (let sess of sessions) {
-      const resultChar = mapResult(sess.ketQua);
-      if (resultChar !== '?') {
-        historyStr += resultChar;
-      }
-    }
+    const phien =
+      latest.session ||
+      latest.phien ||
+      latest.id ||
+      "0";
 
-    if (historyStr.length === 0) {
-      throw new Error('Sau khi lọc, không có kết quả tài/xỉu hợp lệ');
-    }
+    const ketQua = normalizeResult(
+      latest.result ||
+      latest.ket_qua ||
+      latest.status
+    );
 
-    const { prediction: duDoan, confidence: doTinCay } = predictNext(historyStr);
-    const phienHienTai = lastSession.phien + 1;
-    const chuoiCau = historyStr;
+    const xucXac = getDice(latest);
 
-    const output = `Id: S2king
-Phien: ${lastSession.phien}
-Ket_qua: ${lastResult}
-Xuc_xac: ${lastXucXac}
-Phien_hien_tai: ${phienHienTai}
-Du_doan: ${duDoan}
-Do_tin_cay: ${doTinCay}%
-Chuoi_cau: ${chuoiCau}`;
+    const currentSession = Number(phien) + 1;
 
-    res.type('text/plain').send(output);
-  } catch (error) {
-    console.error('Lỗi chi tiết:', error.message);
-    res.status(500).send(`Lỗi server: ${error.message}`);
+    const pred = predict(history);
+
+    cache.text =
+`Id: S2king
+Phien: ${phien}
+Ket_qua: ${ketQua}
+Xuc_xac: ${xucXac}
+Phien_hien_tai: ${currentSession}
+Du_doan: ${pred.prediction}
+Do_tin_cay: ${pred.confidence}%
+Chuoi_cau: ${pred.cau}`;
+
+  } catch (err) {
+    cache.text = "Lỗi lấy dữ liệu API";
   }
+}
+
+app.get("/", async (req, res) => {
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.send(cache.text);
 });
 
+updateData();
+
+setInterval(updateData, 5000);
+
 app.listen(PORT, () => {
-  console.log(`Server đang lắng nghe tại cổng ${PORT}`);
+  console.log("Server running on port " + PORT);
 });
