@@ -1,13 +1,15 @@
 {
-  "name": "taixiu-predictor",
+  "name": "xuc-xac-predictor",
   "version": "1.0.0",
-  "description": "Dự đoán Tài/Xỉu dựa trên lịch sử từ API treo-lc79",
+  "description": "Dự đoán tài xỉu dựa trên lịch sử từ API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "node-fetch": "^3.3.2"
+    "express": "^4.18.2",
+    "axios": "^1.6.2"
   },
-  "type": "module"
+  "author": "S2king",
+  "license": "MIT"
 }
