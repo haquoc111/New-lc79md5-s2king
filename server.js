@@ -6,53 +6,22 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const API_URL = "https://treo-lc79.onrender.com/";
 
-let DATA_TEXT = "Đang tải dữ liệu...";
+let DATA = "Đang tải dữ liệu...";
 
-function toResult(v) {
-  if (!v) return "xỉu";
+function normalizeResult(value) {
+  if (!value) return "xỉu";
 
-  const t = String(v).toLowerCase();
+  const v = String(value).toLowerCase();
 
   if (
-    t.includes("tài") ||
-    t.includes("tai") ||
-    t === "t"
+    v.includes("tài") ||
+    v.includes("tai") ||
+    v === "t"
   ) {
     return "tài";
   }
 
   return "xỉu";
-}
-
-function getDice(item) {
-  // dạng [1,2,3]
-  if (Array.isArray(item?.xuc_xac)) {
-    return item.xuc_xac.join("-");
-  }
-
-  if (Array.isArray(item?.dice)) {
-    return item.dice.join("-");
-  }
-
-  // dạng dice1 dice2 dice3
-  if (
-    item?.dice1 !== undefined &&
-    item?.dice2 !== undefined &&
-    item?.dice3 !== undefined
-  ) {
-    return `${item.dice1}-${item.dice2}-${item.dice3}`;
-  }
-
-  // dạng x1 x2 x3
-  if (
-    item?.x1 !== undefined &&
-    item?.x2 !== undefined &&
-    item?.x3 !== undefined
-  ) {
-    return `${item.x1}-${item.x2}-${item.x3}`;
-  }
-
-  return "null-null-null";
 }
 
 function getSession(item) {
@@ -66,15 +35,44 @@ function getSession(item) {
 }
 
 function getResult(item) {
-  return toResult(
+  return normalizeResult(
     item?.ket_qua ||
     item?.result ||
     item?.status
   );
 }
 
-function buildCau(list) {
-  return list
+function getDice(item) {
+
+  if (Array.isArray(item?.xuc_xac)) {
+    return item.xuc_xac.join("-");
+  }
+
+  if (Array.isArray(item?.dice)) {
+    return item.dice.join("-");
+  }
+
+  if (
+    item?.dice1 !== undefined &&
+    item?.dice2 !== undefined &&
+    item?.dice3 !== undefined
+  ) {
+    return `${item.dice1}-${item.dice2}-${item.dice3}`;
+  }
+
+  if (
+    item?.x1 !== undefined &&
+    item?.x2 !== undefined &&
+    item?.x3 !== undefined
+  ) {
+    return `${item.x1}-${item.x2}-${item.x3}`;
+  }
+
+  return "null-null-null";
+}
+
+function buildCau(history) {
+  return history
     .map(i => getResult(i) === "tài" ? "T" : "X")
     .join("");
 }
@@ -83,17 +81,19 @@ function predict(history) {
 
   const results = history.map(i => getResult(i));
 
-  let tai = 0;
-  let xiu = 0;
+  const cau = buildCau(history);
 
-  // thống kê tổng
+  let taiPoint = 0;
+  let xiuPoint = 0;
+
+  // tổng lịch sử
   for (const r of results) {
-    if (r === "tài") tai++;
-    else xiu++;
+    if (r === "tài") taiPoint++;
+    else xiuPoint++;
   }
 
-  // thống kê gần
-  const recent = results.slice(-12);
+  // 10 phiên gần
+  const recent = results.slice(-10);
 
   let recentTai = 0;
   let recentXiu = 0;
@@ -103,60 +103,92 @@ function predict(history) {
     else recentXiu++;
   }
 
-  // phát hiện cầu
+  taiPoint += recentTai * 2;
+  xiuPoint += recentXiu * 2;
+
+  // phát hiện bệt
   const last = results[results.length - 1];
 
   let streak = 1;
 
   for (let i = results.length - 2; i >= 0; i--) {
+
     if (results[i] === last) {
       streak++;
     } else {
       break;
     }
+
   }
 
-  let predict = "tài";
-  let confidence = 50;
-
-  // bệt mạnh => bẻ cầu
+  // bệt dài => bẻ cầu
   if (streak >= 4) {
+
+    if (last === "tài") {
+      xiuPoint += streak * 5;
+    } else {
+      taiPoint += streak * 5;
+    }
+
+  }
+
+  // cầu 1-1
+  const last6 = cau.slice(-6);
+
+  if (
+    last6 === "TXT XTX".replace(/\s/g, "") ||
+    last6 === "XTXTXT"
+  ) {
+
+    if (last === "tài") {
+      xiuPoint += 8;
+    } else {
+      taiPoint += 8;
+    }
+
+  }
+
+  // cầu 2-2
+  const last4 = cau.slice(-4);
+
+  if (last4 === "TTXX") taiPoint += 6;
+  if (last4 === "XXTT") xiuPoint += 6;
+
+  // random nhẹ tránh fix 1 bên
+  const random = Math.floor(Math.random() * 6);
+
+  if (random <= 2) taiPoint += random;
+  else xiuPoint += (random - 2);
+
+  let predict = taiPoint > xiuPoint
+    ? "tài"
+    : "xỉu";
+
+  // nếu bằng nhau => theo phiên cuối
+  if (taiPoint === xiuPoint) {
 
     predict = last === "tài"
       ? "xỉu"
       : "tài";
 
-    confidence = 78;
-
-  } else {
-
-    // bên nào ra nhiều gần đây thì ưu tiên bên còn lại
-    if (recentTai > recentXiu) {
-      predict = "xỉu";
-    } else if (recentXiu > recentTai) {
-      predict = "tài";
-    } else {
-
-      // cân bằng thì theo tổng
-      predict = tai > xiu
-        ? "xỉu"
-        : "tài";
-    }
-
-    const diff = Math.abs(recentTai - recentXiu);
-
-    confidence = 60 + diff * 4;
-
-    if (confidence > 90) confidence = 90;
   }
+
+  let confidence = Math.floor(
+    (Math.max(taiPoint, xiuPoint) /
+    (taiPoint + xiuPoint)) * 100
+  );
+
+  if (confidence < 55) confidence = 55;
+  if (confidence > 93) confidence = 93;
 
   return {
     predict,
-    confidence
+    confidence,
+    cau
   };
 }
 
-async function update() {
+async function updateData() {
 
   try {
 
@@ -166,7 +198,6 @@ async function update() {
 
     let data = res.data;
 
-    // tự nhận dạng dữ liệu
     if (Array.isArray(data)) {
       data = data;
     } else if (Array.isArray(data.history)) {
@@ -178,11 +209,11 @@ async function update() {
     }
 
     if (!data.length) {
-      DATA_TEXT = "Không có dữ liệu";
+      DATA = "Không có dữ liệu";
       return;
     }
 
-    // sắp xếp phiên tăng dần
+    // sort tăng dần
     data.sort((a, b) => {
       return Number(getSession(a)) - Number(getSession(b));
     });
@@ -193,47 +224,44 @@ async function update() {
 
     const ketQua = getResult(latest);
 
-    // FIX lấy xúc xắc từ api
     const xucXac = getDice(latest);
 
-    const currentSession = Number(phien) + 1;
+    const current = Number(phien) + 1;
 
     const pred = predict(data);
 
-    const cau = buildCau(data);
-
-    DATA_TEXT =
+    DATA =
 `Id: S2king
 Phien: ${phien}
 Ket_qua: ${ketQua}
 Xuc_xac: ${xucXac}
-Phien_hien_tai: ${currentSession}
+Phien_hien_tai: ${current}
 Du_doan: ${pred.predict}
 Do_tin_cay: ${pred.confidence}%
-Chuoi_cau: ${cau}`;
+Chuoi_cau: ${pred.cau}`;
 
-  } catch (e) {
+  } catch (err) {
 
-    DATA_TEXT = "Lỗi lấy dữ liệu";
+    DATA = "Lỗi API";
 
   }
 
 }
 
-app.get("/", async (req, res) => {
+app.get("/", (req, res) => {
 
   res.setHeader(
     "Content-Type",
     "text/plain; charset=utf-8"
   );
 
-  res.send(DATA_TEXT);
+  res.send(DATA);
 
 });
 
-update();
+updateData();
 
-setInterval(update, 5000);
+setInterval(updateData, 5000);
 
 app.listen(PORT, () => {
   console.log("Server running " + PORT);
