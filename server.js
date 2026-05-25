@@ -4,105 +4,105 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Hàm lấy dữ liệu lịch sử từ API
-async function fetchHistoryData() {
+async function fetchHistory() {
     try {
-        const response = await axios.get('https://treo-lc79.onrender.com/');
-        return response.data;
-    } catch (error) {
-        console.error('Lỗi khi gọi API:', error.message);
+        const res = await axios.get('https://treo-lc79.onrender.com/');
+        return res.data;
+    } catch (err) {
+        console.error('Lỗi lấy dữ liệu:', err.message);
         return null;
     }
 }
 
-// Hàm chuẩn hóa kết quả 'TAI'/'XIU' thành 'T'/'X'
-function normalizeResult(result) {
-    return result === 'TAI' ? 'T' : 'X';
+function normalize(r) {
+    return r === 'TAI' ? 'T' : 'X';
 }
 
-// Hàm tạo chuỗi cầu (pattern string) từ lịch sử kết quả
-function getPatternString(history) {
-    return history.map(item => normalizeResult(item.result)).join('');
+function buildFullPattern(history) {
+    // Sắp xếp phiên tăng dần (cũ -> mới)
+    const sorted = [...history].sort((a, b) => a.phien - b.phien);
+    return sorted.map(item => normalize(item.result)).join('');
 }
 
-// Hàm dự đoán dựa trên chuỗi lịch sử
-function predictOutcome(history) {
-    if (history.length < 10) {
-        return { prediction: 'TAI', confidence: '50%' };
+// Thuật toán dự đoán dựa trên mẫu 4 phiên cuối cùng
+function predictWithPattern(fullPattern) {
+    const len = fullPattern.length;
+    if (len < 5) {
+        return { pred: 'TAI', conf: '50%' };
     }
 
-    const patternString = getPatternString(history);
-    const lastPattern = patternString.slice(-4);
-
-    const predictions = [];
-    let matchCount = 0;
-
-    for (let i = 0; i <= patternString.length - 5; i++) {
-        const currentPattern = patternString.slice(i, i + 4);
-        const nextResult = patternString[i + 4];
-
-        if (currentPattern === lastPattern) {
-            predictions.push(nextResult);
-            matchCount++;
+    const last4 = fullPattern.slice(-4);
+    let positions = [];
+    // Tìm tất cả vị trí xuất hiện của last4 trong toàn bộ chuỗi (không tính vị trí cuối cùng)
+    for (let i = 0; i <= len - 5; i++) {
+        if (fullPattern.slice(i, i + 4) === last4) {
+            positions.push(i);
         }
     }
 
-    if (predictions.length === 0) {
-        const recentResults = history.slice(-5);
-        const tCount = recentResults.filter(r => r.result === 'TAI').length;
-        const xCount = recentResults.filter(r => r.result === 'XIU').length;
-
-        if (tCount > xCount) {
-            return { prediction: 'TAI', confidence: `${Math.floor(tCount / 5 * 100)}%` };
-        } else if (xCount > tCount) {
-            return { prediction: 'XIU', confidence: `${Math.floor(xCount / 5 * 100)}%` };
-        } else {
-            return { prediction: 'TAI', confidence: '50%' };
+    if (positions.length === 0) {
+        // Không tìm thấy mẫu 4 -> dùng mẫu 3
+        const last3 = fullPattern.slice(-3);
+        for (let i = 0; i <= len - 4; i++) {
+            if (fullPattern.slice(i, i + 3) === last3) {
+                positions.push(i);
+            }
+        }
+        if (positions.length === 0) {
+            // Vẫn không có -> dùng tổng thể
+            const tTotal = (fullPattern.match(/T/g) || []).length;
+            const xTotal = (fullPattern.match(/X/g) || []).length;
+            const pred = tTotal >= xTotal ? 'TAI' : 'XIU';
+            const conf = Math.floor((Math.max(tTotal, xTotal) / fullPattern.length) * 100);
+            return { pred, conf: `${conf}%` };
         }
     }
 
-    const tPredictions = predictions.filter(p => p === 'T').length;
-    const xPredictions = predictions.filter(p => p === 'X').length;
-    const total = predictions.length;
+    // Lấy kết quả ngay sau mỗi vị trí khớp
+    const nextResults = positions.map(pos => fullPattern[pos + 4]);
+    const tCount = nextResults.filter(r => r === 'T').length;
+    const xCount = nextResults.filter(r => r === 'X').length;
+    const total = nextResults.length;
 
-    let prediction = tPredictions >= xPredictions ? 'TAI' : 'XIU';
-    let confidence = Math.floor(Math.max(tPredictions, xPredictions) / total * 100);
+    let pred = tCount >= xCount ? 'TAI' : 'XIU';
+    let confidence = Math.floor((Math.max(tCount, xCount) / total) * 100);
 
-    if (matchCount > 10) confidence = Math.min(confidence + 10, 95);
-    else if (matchCount > 5) confidence = Math.min(confidence + 5, 90);
+    // Điều chỉnh độ tin cậy theo số lần lặp mẫu
+    if (total >= 5) confidence = Math.min(confidence + 12, 95);
+    else if (total >= 3) confidence = Math.min(confidence + 7, 90);
+    else if (total === 2) confidence = Math.min(confidence + 3, 80);
 
-    return { prediction, confidence: `${confidence}%` };
+    return { pred, conf: `${confidence}%` };
 }
 
-// Endpoint chính trả về kết quả theo đúng format yêu cầu
 app.get('/', async (req, res) => {
-    const data = await fetchHistoryData();
-
+    const data = await fetchHistory();
     if (!data || !data.history || data.history.length === 0) {
-        return res.status(500).json({ error: 'Không thể lấy dữ liệu lịch sử' });
+        return res.status(500).json({ error: 'Không lấy được lịch sử' });
     }
 
     const history = data.history;
-    const latestSession = history[0];
-    const currentPhien = latestSession.phien + 1;
+    const sorted = [...history].sort((a, b) => a.phien - b.phien);
+    const latest = sorted[sorted.length - 1];
+    const nextPhien = latest.phien + 1;
 
-    const { prediction, confidence } = predictOutcome(history);
-    const patternString = getPatternString(history);
+    const fullPattern = buildFullPattern(history);
+    const { pred, conf } = predictWithPattern(fullPattern);
 
     const response = {
         Id: "S2king",
-        Phien: latestSession.phien,
-        Ket_qua: latestSession.result,
-        Xuc_xac: latestSession.dices.join('-'),
-        Phien_hien_tai: currentPhien,
-        Du_doan: prediction === 'TAI' ? 'tài' : 'xỉu',
-        Do_tin_cay: confidence,
-        Chuoi_cau: patternString.slice(-Math.min(patternString.length, 20))
+        Phien: latest.phien,
+        Ket_qua: latest.result === 'TAI' ? 'tài' : 'xỉu',
+        Xuc_xac: latest.dices.join('-'),
+        Phien_hien_tai: nextPhien,
+        Du_doan: pred === 'TAI' ? 'tài' : 'xỉu',
+        Do_tin_cay: conf,
+        Chuoi_cau: fullPattern   // toàn bộ chuỗi cầu từ tất cả phiên
     };
 
     res.json(response);
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 Server is running on port ${PORT}`);
+    console.log(`Server chạy tại cổng ${PORT}`);
 });
