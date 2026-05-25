@@ -6,18 +6,16 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const API_URL = "https://treo-lc79.onrender.com/";
 
-let cache = {
-  text: "Đang tải dữ liệu..."
-};
+let DATA_TEXT = "Đang tải dữ liệu...";
 
-function normalizeResult(text) {
-  if (!text) return "xỉu";
+function toResult(v) {
+  if (!v) return "xỉu";
 
-  const t = String(text).toLowerCase();
+  const t = String(v).toLowerCase();
 
   if (
-    t.includes("tai") ||
     t.includes("tài") ||
+    t.includes("tai") ||
     t === "t"
   ) {
     return "tài";
@@ -27,87 +25,85 @@ function normalizeResult(text) {
 }
 
 function getDice(item) {
-  if (Array.isArray(item?.dice)) {
-    return item.dice.join("-");
-  }
-
+  // dạng [1,2,3]
   if (Array.isArray(item?.xuc_xac)) {
     return item.xuc_xac.join("-");
   }
 
-  if (item?.dice1 && item?.dice2 && item?.dice3) {
+  if (Array.isArray(item?.dice)) {
+    return item.dice.join("-");
+  }
+
+  // dạng dice1 dice2 dice3
+  if (
+    item?.dice1 !== undefined &&
+    item?.dice2 !== undefined &&
+    item?.dice3 !== undefined
+  ) {
     return `${item.dice1}-${item.dice2}-${item.dice3}`;
   }
 
-  return "1-1-1";
+  // dạng x1 x2 x3
+  if (
+    item?.x1 !== undefined &&
+    item?.x2 !== undefined &&
+    item?.x3 !== undefined
+  ) {
+    return `${item.x1}-${item.x2}-${item.x3}`;
+  }
+
+  return "null-null-null";
 }
 
-function buildCau(history) {
-  return history
-    .map(i => {
-      const r = normalizeResult(
-        i.result ||
-        i.ket_qua ||
-        i.status
-      );
+function getSession(item) {
+  return (
+    item?.phien ||
+    item?.session ||
+    item?.id ||
+    item?.game_id ||
+    0
+  );
+}
 
-      return r === "tài" ? "T" : "X";
-    })
+function getResult(item) {
+  return toResult(
+    item?.ket_qua ||
+    item?.result ||
+    item?.status
+  );
+}
+
+function buildCau(list) {
+  return list
+    .map(i => getResult(i) === "tài" ? "T" : "X")
     .join("");
 }
 
 function predict(history) {
-  if (!history.length) {
-    return {
-      prediction: "tài",
-      confidence: 50,
-      cau: ""
-    };
+
+  const results = history.map(i => getResult(i));
+
+  let tai = 0;
+  let xiu = 0;
+
+  // thống kê tổng
+  for (const r of results) {
+    if (r === "tài") tai++;
+    else xiu++;
   }
 
-  const results = history.map(i =>
-    normalizeResult(
-      i.result ||
-      i.ket_qua ||
-      i.status
-    )
-  );
+  // thống kê gần
+  const recent = results.slice(-12);
 
-  const cau = results
-    .map(r => (r === "tài" ? "T" : "X"))
-    .join("");
+  let recentTai = 0;
+  let recentXiu = 0;
 
-  let taiScore = 0;
-  let xiuScore = 0;
-
-  // Phân tích toàn bộ lịch sử
-  for (let i = 1; i < results.length; i++) {
-    const current = results[i];
-    const prev = results[i - 1];
-
-    // Bệt
-    if (current === prev) {
-      if (current === "tài") taiScore += 2;
-      else xiuScore += 2;
-    }
-
-    // Xen kẽ
-    if (current !== prev) {
-      if (current === "tài") taiScore += 1;
-      else xiuScore += 1;
-    }
+  for (const r of recent) {
+    if (r === "tài") recentTai++;
+    else recentXiu++;
   }
 
-  // 5 phiên gần nhất
-  const recent = results.slice(-5);
-
-  const taiRecent = recent.filter(x => x === "tài").length;
-  const xiuRecent = recent.filter(x => x === "xỉu").length;
-
-  taiScore += taiRecent * 2;
-  xiuScore += xiuRecent * 2;
-
-  // Bẻ cầu khi bệt dài
+  // phát hiện cầu
   const last = results[results.length - 1];
 
   let streak = 1;
@@ -120,106 +116,125 @@ function predict(history) {
     }
   }
 
+  let predict = "tài";
+  let confidence = 50;
+
+  // bệt mạnh => bẻ cầu
   if (streak >= 4) {
-    if (last === "tài") {
-      xiuScore += streak * 3;
+
+    predict = last === "tài"
+      ? "xỉu"
+      : "tài";
+
+    confidence = 78;
+
+  } else {
+
+    // bên nào ra nhiều gần đây thì ưu tiên bên còn lại
+    if (recentTai > recentXiu) {
+      predict = "xỉu";
+    } else if (recentXiu > recentTai) {
+      predict = "tài";
     } else {
-      taiScore += streak * 3;
+
+      // cân bằng thì theo tổng
+      predict = tai > xiu
+        ? "xỉu"
+        : "tài";
     }
+
+    const diff = Math.abs(recentTai - recentXiu);
+
+    confidence = 60 + diff * 4;
+
+    if (confidence > 90) confidence = 90;
   }
 
-  // Pattern 2-2
-  const last4 = cau.slice(-4);
-
-  if (last4 === "TTXX") taiScore += 4;
-  if (last4 === "XXTT") xiuScore += 4;
-  if (last4 === "TXT X".replace(/\s/g, "")) xiuScore += 3;
-  if (last4 === "XTXT") taiScore += 3;
-
-  let prediction = taiScore >= xiuScore ? "tài" : "xỉu";
-
-  let total = taiScore + xiuScore;
-
-  let confidence = Math.floor(
-    (Math.max(taiScore, xiuScore) / (total || 1)) * 100
-  );
-
-  if (confidence < 55) confidence = 55;
-  if (confidence > 95) confidence = 95;
-
   return {
-    prediction,
-    confidence,
-    cau
+    predict,
+    confidence
   };
 }
 
-async function updateData() {
+async function update() {
+
   try {
-    const response = await axios.get(API_URL, {
+
+    const res = await axios.get(API_URL, {
       timeout: 10000
     });
 
-    let data = response.data;
+    let data = res.data;
 
-    if (!Array.isArray(data)) {
-      if (Array.isArray(data.history)) {
-        data = data.history;
-      } else if (Array.isArray(data.data)) {
-        data = data.data;
-      } else {
-        data = [];
-      }
+    // tự nhận dạng dữ liệu
+    if (Array.isArray(data)) {
+      data = data;
+    } else if (Array.isArray(data.history)) {
+      data = data.history;
+    } else if (Array.isArray(data.data)) {
+      data = data.data;
+    } else {
+      data = [];
     }
 
-    if (!data.length) return;
+    if (!data.length) {
+      DATA_TEXT = "Không có dữ liệu";
+      return;
+    }
 
-    const history = data.reverse();
+    // sắp xếp phiên tăng dần
+    data.sort((a, b) => {
+      return Number(getSession(a)) - Number(getSession(b));
+    });
 
-    const latest = history[history.length - 1];
+    const latest = data[data.length - 1];
 
-    const phien =
-      latest.session ||
-      latest.phien ||
-      latest.id ||
-      "0";
+    const phien = getSession(latest);
 
-    const ketQua = normalizeResult(
-      latest.result ||
-      latest.ket_qua ||
-      latest.status
-    );
+    const ketQua = getResult(latest);
 
+    // FIX lấy xúc xắc từ api
     const xucXac = getDice(latest);
 
     const currentSession = Number(phien) + 1;
 
-    const pred = predict(history);
+    const pred = predict(data);
 
-    cache.text =
+    const cau = buildCau(data);
+
+    DATA_TEXT =
 `Id: S2king
 Phien: ${phien}
 Ket_qua: ${ketQua}
 Xuc_xac: ${xucXac}
 Phien_hien_tai: ${currentSession}
-Du_doan: ${pred.prediction}
+Du_doan: ${pred.predict}
 Do_tin_cay: ${pred.confidence}%
-Chuoi_cau: ${pred.cau}`;
+Chuoi_cau: ${cau}`;
 
-  } catch (err) {
-    cache.text = "Lỗi lấy dữ liệu API";
+  } catch (e) {
+
+    DATA_TEXT = "Lỗi lấy dữ liệu";
+
   }
+
 }
 
 app.get("/", async (req, res) => {
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.send(cache.text);
+
+  res.setHeader(
+    "Content-Type",
+    "text/plain; charset=utf-8"
+  );
+
+  res.send(DATA_TEXT);
+
 });
 
-updateData();
+update();
 
-setInterval(updateData, 5000);
+setInterval(update, 5000);
 
 app.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
+  console.log("Server running " + PORT);
 });
