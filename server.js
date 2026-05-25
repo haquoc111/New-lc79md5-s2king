@@ -4,35 +4,42 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// API lấy dữ liệu lịch sử
 const API_URL = 'https://treo-lc79.onrender.com/';
 
-// Hàm chuyển kết quả thành ký tự T (tài) hoặc X (xỉu)
 const mapResult = (result) => {
-  const normalized = result.toLowerCase().trim();
+  const normalized = String(result).toLowerCase().trim();
   if (normalized === 'tài' || normalized === 'tai') return 'T';
   if (normalized === 'xỉu' || normalized === 'xiu') return 'X';
   return '?';
 };
 
-// Hàm dự đoán dựa trên chuỗi lịch sử
+// Hàm đệ quy tìm mảng đầu tiên trong object (ưu tiên mảng có chứa các phiên)
+function findFirstArray(obj, depth = 0) {
+  if (depth > 10) return null;
+  if (Array.isArray(obj)) return obj;
+  if (obj && typeof obj === 'object') {
+    for (const key of Object.keys(obj)) {
+      const found = findFirstArray(obj[key], depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+// Hàm dự đoán (giữ nguyên)
 function predictNext(historyStr) {
   if (!historyStr || historyStr.length === 0) return { prediction: 'T', confidence: 50 };
-
   const len = historyStr.length;
-  const maxPatternLen = Math.min(10, len); // Xét pattern dài tối đa 10
+  const maxPatternLen = Math.min(10, len);
   let bestPrediction = null;
   let bestConfidence = 0;
   let bestPatternLen = 0;
 
-  // Duyệt từ pattern dài nhất đến ngắn nhất để ưu tiên mẫu dài
   for (let patternLen = maxPatternLen; patternLen >= 1; patternLen--) {
     if (len < patternLen + 1) continue;
-
     const currentPattern = historyStr.slice(-patternLen);
     let countT = 0, countX = 0, totalMatches = 0;
 
-    // Duyệt tất cả các vị trí có pattern khớp (trừ vị trí cuối cùng)
     for (let i = 0; i <= len - patternLen - 1; i++) {
       const sub = historyStr.slice(i, i + patternLen);
       if (sub === currentPattern) {
@@ -46,14 +53,12 @@ function predictNext(historyStr) {
     if (totalMatches > 0) {
       let prediction = countT > countX ? 'T' : (countX > countT ? 'X' : null);
       let confidence = Math.max(countT, countX) / totalMatches * 100;
-      // Nếu hòa, dùng tổng tỷ lệ chung để quyết định
       if (!prediction) {
         const totalT = (historyStr.match(/T/g) || []).length;
         const totalX = (historyStr.match(/X/g) || []).length;
         prediction = totalT >= totalX ? 'T' : 'X';
         confidence = 50;
       }
-      // Chọn kết quả tốt nhất ưu tiên pattern dài hơn và độ tin cậy cao
       if (patternLen > bestPatternLen || (patternLen === bestPatternLen && confidence > bestConfidence)) {
         bestPrediction = prediction;
         bestConfidence = confidence;
@@ -62,7 +67,6 @@ function predictNext(historyStr) {
     }
   }
 
-  // Nếu không tìm thấy pattern nào (rất hiếm), dùng tổng tần suất
   if (!bestPrediction) {
     const totalT = (historyStr.match(/T/g) || []).length;
     const totalX = (historyStr.match(/X/g) || []).length;
@@ -76,23 +80,46 @@ function predictNext(historyStr) {
   };
 }
 
-// Endpoint chính trả về mẫu yêu cầu
 app.get('/', async (req, res) => {
   try {
-    // Gọi API lấy dữ liệu
-    const response = await axios.get(API_URL);
-    let data = response.data;
+    const response = await axios.get(API_URL, { timeout: 10000 });
+    const rawData = response.data;
 
-    // Kiểm tra cấu trúc dữ liệu (có thể là mảng trực tiếp hoặc trong data.data)
-    let sessions = Array.isArray(data) ? data : (data.data && Array.isArray(data.data) ? data.data : []);
-    if (sessions.length === 0) {
-      throw new Error('Không lấy được dữ liệu phiên từ API');
+    // Debug: in cấu trúc ra console (chỉ in 1 lần hoặc khi lỗi)
+    console.log('Cấu trúc response:', JSON.stringify(rawData).slice(0, 500));
+
+    // Tìm mảng chứa dữ liệu phiên
+    let sessions = null;
+    if (Array.isArray(rawData)) {
+      sessions = rawData;
+    } else if (rawData && typeof rawData === 'object') {
+      // Thử với các key thông dụng
+      const possibleKeys = ['data', 'sessions', 'results', 'history', 'items', 'list'];
+      for (const key of possibleKeys) {
+        if (Array.isArray(rawData[key])) {
+          sessions = rawData[key];
+          break;
+        }
+      }
+      // Nếu chưa thấy, quét đệ quy tìm mảng đầu tiên
+      if (!sessions) {
+        sessions = findFirstArray(rawData);
+      }
     }
 
-    // Sắp xếp theo phiên tăng dần
-    sessions.sort((a, b) => a.phien - b.phien);
+    if (!sessions || sessions.length === 0) {
+      console.error('Không tìm thấy mảng phiên hợp lệ. Dữ liệu nhận được:', JSON.stringify(rawData).slice(0, 200));
+      throw new Error('Không tìm thấy mảng phiên trong dữ liệu API');
+    }
 
-    // Xây dựng chuỗi cầu
+    // Lọc chỉ lấy các item có trường "phien" và "ket_qua"
+    sessions = sessions.filter(s => s && (s.phien !== undefined) && (s.ket_qua !== undefined));
+    if (sessions.length === 0) {
+      throw new Error('Không có phiên nào chứa trường phien/ket_qua hợp lệ');
+    }
+
+    sessions.sort((a, b) => Number(a.phien) - Number(b.phien));
+
     let historyStr = '';
     let lastSession = null;
     let lastResult = '';
@@ -109,19 +136,13 @@ app.get('/', async (req, res) => {
     }
 
     if (historyStr.length === 0) {
-      throw new Error('Không có kết quả hợp lệ để phân tích');
+      throw new Error('Không có kết quả hợp lệ (tài/xỉu) sau khi xử lý');
     }
 
-    // Dự đoán phiên tiếp theo
     const { prediction: duDoan, confidence: doTinCay } = predictNext(historyStr);
-
-    // Lấy phiên hiện tại (phiên cuối + 1)
     const phienHienTai = lastSession.phien + 1;
-
-    // Chuỗi cầu đầy đủ
     const chuoiCau = historyStr;
 
-    // Định dạng output theo mẫu
     const output = `Id: S2king
 Phien: ${lastSession.phien}
 Ket_qua: ${lastResult}
@@ -133,11 +154,15 @@ Chuoi_cau: ${chuoiCau}`;
 
     res.type('text/plain').send(output);
   } catch (error) {
-    console.error('Lỗi:', error.message);
-    res.status(500).send('Lỗi server: ' + error.message);
+    console.error('Chi tiết lỗi:', error.message);
+    if (error.response) {
+      console.error('Status:', error.response.status);
+      console.error('Data:', error.response.data);
+    }
+    res.status(500).send(`Lỗi server: ${error.message}`);
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server đang chạy tại http://localhost:${PORT}`);
+  console.log(`Server chạy tại http://localhost:${PORT}`);
 });
