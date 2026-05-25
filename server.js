@@ -6,27 +6,102 @@ const PORT = process.env.PORT || 3000;
 
 const API_URL = 'https://treo-lc79.onrender.com/';
 
-const mapResult = (result) => {
-  const normalized = String(result).toLowerCase().trim();
-  if (normalized === 'tài' || normalized === 'tai') return 'T';
-  if (normalized === 'xỉu' || normalized === 'xiu') return 'X';
+// Hàm chuyển kết quả (dựa trên chuỗi)
+function mapResult(value) {
+  if (!value) return '?';
+  const str = String(value).toLowerCase().trim();
+  if (str === 'tài' || str === 'tai') return 'T';
+  if (str === 'xỉu' || str === 'xiu') return 'X';
   return '?';
-};
+}
 
-// Hàm đệ quy tìm mảng đầu tiên trong object (ưu tiên mảng có chứa các phiên)
-function findFirstArray(obj, depth = 0) {
+// Tự động tìm mảng chứa dữ liệu phiên (đệ quy)
+function findArray(obj, depth = 0) {
   if (depth > 10) return null;
-  if (Array.isArray(obj)) return obj;
+  if (Array.isArray(obj) && obj.length > 0) return obj;
   if (obj && typeof obj === 'object') {
-    for (const key of Object.keys(obj)) {
-      const found = findFirstArray(obj[key], depth + 1);
+    for (let key in obj) {
+      const found = findArray(obj[key], depth + 1);
       if (found) return found;
     }
   }
   return null;
 }
 
-// Hàm dự đoán (giữ nguyên)
+// Tự động map các trường từ một object phiên
+function mapSessionFields(session) {
+  if (!session || typeof session !== 'object') return null;
+
+  // Các tên trường có thể có
+  const possiblePhien = ['phien', 'phiên', 'session', 'session_id', 'id', 'stt', 'no'];
+  const possibleKetQua = ['ket_qua', 'ketqua', 'result', 'kq', 'tai_xiu', 'value'];
+  const possibleXucXac = ['xuc_xac', 'xucxac', 'dice', 'xí_ngầu', 'faces'];
+
+  let phien = null, ketQua = null, xucXac = null;
+
+  // Tìm trường chứa số phiên
+  for (let p of possiblePhien) {
+    if (session[p] !== undefined) {
+      phien = session[p];
+      break;
+    }
+  }
+  // Nếu không tìm thấy, thử lấy key đầu tiên có giá trị là số
+  if (phien === null) {
+    for (let key in session) {
+      if (typeof session[key] === 'number' || !isNaN(Number(session[key]))) {
+        phien = session[key];
+        break;
+      }
+    }
+  }
+
+  // Tìm trường chứa kết quả
+  for (let k of possibleKetQua) {
+    if (session[k] !== undefined) {
+      ketQua = session[k];
+      break;
+    }
+  }
+  if (ketQua === null) {
+    for (let key in session) {
+      let val = session[key];
+      if (typeof val === 'string') {
+        let lower = val.toLowerCase();
+        if (lower.includes('tài') || lower.includes('tai') || lower.includes('xỉu') || lower.includes('xiu')) {
+          ketQua = val;
+          break;
+        }
+      }
+    }
+  }
+
+  // Tìm trường chứa xúc xắc (có thể là chuỗi "5-5-5" hoặc mảng)
+  for (let x of possibleXucXac) {
+    if (session[x] !== undefined) {
+      xucXac = session[x];
+      break;
+    }
+  }
+  if (xucXac === null) {
+    for (let key in session) {
+      let val = session[key];
+      if (typeof val === 'string' && /^\d+[-]\d+[-]\d+$/.test(val)) {
+        xucXac = val;
+        break;
+      }
+      if (Array.isArray(val) && val.length === 3 && val.every(v => typeof v === 'number')) {
+        xucXac = val.join('-');
+        break;
+      }
+    }
+  }
+
+  if (phien === null || ketQua === null) return null;
+  return { phien: Number(phien), ketQua: String(ketQua), xucXac: xucXac ? String(xucXac) : '?' };
+}
+
+// Hàm dự đoán (giữ nguyên logic cũ)
 function predictNext(historyStr) {
   if (!historyStr || historyStr.length === 0) return { prediction: 'T', confidence: 50 };
   const len = historyStr.length;
@@ -82,61 +157,53 @@ function predictNext(historyStr) {
 
 app.get('/', async (req, res) => {
   try {
-    const response = await axios.get(API_URL, { timeout: 10000 });
+    const response = await axios.get(API_URL, { timeout: 15000 });
     const rawData = response.data;
 
-    // Debug: in cấu trúc ra console (chỉ in 1 lần hoặc khi lỗi)
-    console.log('Cấu trúc response:', JSON.stringify(rawData).slice(0, 500));
+    // Ghi log cấu trúc một phần để debug (chỉ in lên console Render)
+    console.log('===== DỮ LIỆU NHẬN ĐƯỢC =====');
+    console.log(JSON.stringify(rawData).slice(0, 1000));
+    console.log('==============================');
 
-    // Tìm mảng chứa dữ liệu phiên
-    let sessions = null;
-    if (Array.isArray(rawData)) {
-      sessions = rawData;
-    } else if (rawData && typeof rawData === 'object') {
-      // Thử với các key thông dụng
-      const possibleKeys = ['data', 'sessions', 'results', 'history', 'items', 'list'];
-      for (const key of possibleKeys) {
-        if (Array.isArray(rawData[key])) {
-          sessions = rawData[key];
-          break;
-        }
-      }
-      // Nếu chưa thấy, quét đệ quy tìm mảng đầu tiên
-      if (!sessions) {
-        sessions = findFirstArray(rawData);
+    // Bước 1: Tìm mảng trong dữ liệu
+    let rawArray = findArray(rawData);
+    if (!rawArray) {
+      throw new Error('Không tìm thấy mảng dữ liệu nào trong API');
+    }
+    console.log(`Tìm thấy mảng với ${rawArray.length} phần tử. Mẫu phần tử đầu:`, rawArray[0]);
+
+    // Bước 2: Chuyển đổi từng phần tử thành phiên chuẩn
+    const sessions = [];
+    for (let item of rawArray) {
+      const mapped = mapSessionFields(item);
+      if (mapped) {
+        sessions.push(mapped);
+      } else {
+        console.log('Bỏ qua phần tử không map được:', item);
       }
     }
 
-    if (!sessions || sessions.length === 0) {
-      console.error('Không tìm thấy mảng phiên hợp lệ. Dữ liệu nhận được:', JSON.stringify(rawData).slice(0, 200));
-      throw new Error('Không tìm thấy mảng phiên trong dữ liệu API');
-    }
-
-    // Lọc chỉ lấy các item có trường "phien" và "ket_qua"
-    sessions = sessions.filter(s => s && (s.phien !== undefined) && (s.ket_qua !== undefined));
     if (sessions.length === 0) {
-      throw new Error('Không có phiên nào chứa trường phien/ket_qua hợp lệ');
+      throw new Error('Không có phiên nào được map thành công từ dữ liệu');
     }
 
-    sessions.sort((a, b) => Number(a.phien) - Number(b.phien));
+    // Sắp xếp theo số phiên
+    sessions.sort((a, b) => a.phien - b.phien);
 
     let historyStr = '';
-    let lastSession = null;
-    let lastResult = '';
-    let lastXucXac = '';
+    let lastSession = sessions[sessions.length - 1];
+    let lastResult = lastSession.ketQua;
+    let lastXucXac = lastSession.xucXac;
 
-    for (const sess of sessions) {
-      const resultChar = mapResult(sess.ket_qua);
+    for (let sess of sessions) {
+      const resultChar = mapResult(sess.ketQua);
       if (resultChar !== '?') {
         historyStr += resultChar;
       }
-      lastSession = sess;
-      lastResult = sess.ket_qua;
-      lastXucXac = sess.xuc_xac || '?';
     }
 
     if (historyStr.length === 0) {
-      throw new Error('Không có kết quả hợp lệ (tài/xỉu) sau khi xử lý');
+      throw new Error('Sau khi lọc, không có kết quả tài/xỉu hợp lệ');
     }
 
     const { prediction: duDoan, confidence: doTinCay } = predictNext(historyStr);
@@ -154,15 +221,11 @@ Chuoi_cau: ${chuoiCau}`;
 
     res.type('text/plain').send(output);
   } catch (error) {
-    console.error('Chi tiết lỗi:', error.message);
-    if (error.response) {
-      console.error('Status:', error.response.status);
-      console.error('Data:', error.response.data);
-    }
+    console.error('Lỗi chi tiết:', error.message);
     res.status(500).send(`Lỗi server: ${error.message}`);
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server chạy tại http://localhost:${PORT}`);
+  console.log(`Server đang lắng nghe tại cổng ${PORT}`);
 });
