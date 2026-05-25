@@ -1,14 +1,12 @@
 {
-  "name": "s2king-predictor",
+  "name": "taixiu-predictor",
   "version": "1.0.0",
-  "description": "Dự đoán tài xỉu dựa trên phân tích cầu và lịch sử phiên",
+  "description": "Dự đoán tài/xỉu dựa trên lịch sử phiên từ API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "engines": {
-    "node": ">=16.0.0"
-  },
-  "author": "s2king",
-  "license": "ISC"
+  "dependencies": {
+    "axios": "^1.7.2"
+  }
 }
